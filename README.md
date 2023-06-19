@@ -5,7 +5,7 @@ The source files are transcriptions of pretty much the same core code in differe
 <br>
 ### **Minimum requirements to compile/run the code:**  
 
-Source files in `Windows Batch`, `C`, `C++`, `C#.Net`, `PowerShell`, and `VB.Net` are published in the [src](./src) folder. They all depend on Windows being the target operating system. Other specific dependencies are listed below.  
+Source files in `Windows Batch`, `C`, `C++`, `C#.Net`, `PowerShell`, and `VB.Net` are published in the [src](./src) folder. They all depend on Windows being the target operating system. Also, this code relies on the hidden ConPTY window being owned by the Terminal window. Presumably this has been first implemented in Windows Terminal v1.14. Other specific dependencies are listed below.  
 
 | **File** | **Requirement** |
 | :--- | :--- |
