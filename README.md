@@ -45,4 +45,8 @@ I tried to write a piece of code to find the window even if the tab has been mov
 
 In each file is also a piece of unrelated code that fades the window out and in again. I found it an impressive way of proving that the right window had been found.  
 
+### **Example output:**  
+Note the updated thread id (TID) and window handle (HWND) in the newly written lines after moving the tab to another window.  
+![example output](./termwnd.gif)  
+
 <br>
