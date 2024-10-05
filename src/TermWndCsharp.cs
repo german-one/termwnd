@@ -4,6 +4,7 @@
 // Min. req.: .NET Framework 4.5
 
 using System;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
@@ -31,11 +32,6 @@ namespace TerminalProcess
       internal static extern int CompareObjectHandles(IntPtr hFirst, IntPtr hSecond);
       [DllImport("kernel32.dll")]
       internal static extern int DuplicateHandle(IntPtr SrcProcHndl, IntPtr SrcHndl, IntPtr TrgtProcHndl, out IntPtr TrgtHndl, int Acc, int Inherit, int Opts);
-      [DllImport("user32.dll")]
-      [return: MarshalAs(UnmanagedType.Bool)]
-      internal static extern bool EnumWindows(EnumWindowsProc enumFunc, IntPtr lparam);
-      [DllImport("user32.dll")]
-      internal static extern IntPtr GetAncestor(IntPtr hWnd, int flgs);
       [DllImport("kernel32.dll")]
       internal static extern IntPtr GetConsoleWindow();
       [DllImport("kernel32.dll")]
@@ -226,37 +222,10 @@ namespace TerminalProcess
       }
     }
 
-    private static uint findPid;
-    private static IntPtr foundHWnd;
-
-    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
-    private static bool GetOpenConWndCallback(IntPtr hWnd, IntPtr lParam)
-    {
-      uint thisTid = NativeMethods.GetWindowThreadProcessId(hWnd, out uint thisPid);
-      if (thisTid == 0 || thisPid != findPid)
-        return true;
-
-      foundHWnd = hWnd;
-      return false;
-    }
-
-    private static IntPtr GetOpenConWnd(uint termPid)
-    {
-      if (termPid == 0)
-        return IntPtr.Zero;
-
-      findPid = termPid;
-      foundHWnd = IntPtr.Zero;
-      NativeMethods.EnumWindows(new EnumWindowsProc(GetOpenConWndCallback), IntPtr.Zero);
-      return foundHWnd;
-    }
-
     private static IntPtr GetTermWnd(ref bool terminalExpected)
     {
       const int WM_GETICON = 0x007F,
-                GW_OWNER = 4,
-                GA_ROOTOWNER = 3;
+                GW_OWNER = 4;
 
       // We don't have a proper way to figure out to what terminal app the Shell process
       // is connected on the local machine:
@@ -268,34 +237,24 @@ namespace TerminalProcess
         return ConWnd;
 
       // Polling because it may take some milliseconds for Terminal to create its window and take ownership of the hidden ConPTY window.
-      IntPtr conOwner = IntPtr.Zero; // FWIW this receives the terminal window our tab is created in, but it gets never updated if the tab is moved to another window.
-      for (int i = 0; i < 200 && conOwner == IntPtr.Zero; ++i)
+      IntPtr conOwner = IntPtr.Zero;
+      for (int i = 0; i < 100 && conOwner == IntPtr.Zero; ++i)
       {
         Thread.Sleep(5);
         conOwner = NativeMethods.GetWindow(ConWnd, GW_OWNER);
       }
 
-      // Something went wrong if polling did not succeed within 1 second (e.g. it's not Windows Terminal).
-      if (conOwner == IntPtr.Zero)
-        return IntPtr.Zero;
+      if (conOwner != IntPtr.Zero)
+        return conOwner; // This is the terminal window hosting our process if it has been an existing window.
 
+      // In case the terminal process has been newly created for us ...
       // Get the ID of the Shell process that spawned the Conhost process.
-      uint shellTid = NativeMethods.GetWindowThreadProcessId(ConWnd, out uint shellPid);
-      if (shellTid == 0)
+      if (NativeMethods.GetWindowThreadProcessId(ConWnd, out uint shellPid) == 0)
         return IntPtr.Zero;
 
-      // Get the ID of the OpenConsole process spawned for the Shell process.
-      uint openConPid = GetPidOfNamedProcWithOpenProcHandle("OpenConsole", shellPid);
-      if (openConPid == 0)
-        return IntPtr.Zero;
-
-      // Get the hidden window of the OpenConsole process
-      IntPtr openConWnd = GetOpenConWnd(openConPid);
-      if (openConWnd == IntPtr.Zero)
-        return IntPtr.Zero;
-
-      // The root owner window is the Terminal window.
-      return NativeMethods.GetAncestor(openConWnd, GA_ROOTOWNER);
+      // Try to figure out which of WindowsTerminal processes has a handle to the Shell process open.
+      uint termPid = GetPidOfNamedProcWithOpenProcHandle("WindowsTerminal", shellPid);
+      return termPid == 0 ? IntPtr.Zero : Process.GetProcessById((int)termPid).MainWindowHandle;
     }
 
 #if !DEBUG && CODE_ANALYSIS

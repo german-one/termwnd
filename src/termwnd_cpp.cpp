@@ -180,27 +180,17 @@ namespace termproc
       return {};
     }
 
-    using _wnd_callback_dat_t = std::pair<const DWORD, HWND>;
-    static BOOL __stdcall GetOpenConWndCallback(HWND hWnd, LPARAM lParam) noexcept
+    using wnd_callback_dat_t = std::pair<const DWORD, HWND>;
+    static BOOL __stdcall GetTermWndCallback(HWND hWnd, LPARAM lParam) noexcept
     {
-      const auto pSearchDat{ reinterpret_cast<_wnd_callback_dat_t *>(lParam) };
+      const auto pSearchDat{ reinterpret_cast<wnd_callback_dat_t *>(lParam) };
       DWORD pid{};
       ::GetWindowThreadProcessId(hWnd, &pid);
-      if (pid != pSearchDat->first)
+      if (pid != pSearchDat->first || !::IsWindowVisible(hWnd) || ::GetWindow(hWnd, GW_OWNER))
         return TRUE;
 
       pSearchDat->second = hWnd;
       return FALSE;
-    }
-
-    HWND GetOpenConWnd(const DWORD termPid) noexcept
-    {
-      if (!termPid)
-        return nullptr;
-
-      _wnd_callback_dat_t searchDat{ termPid, nullptr };
-      ::EnumWindows(GetOpenConWndCallback, reinterpret_cast<LPARAM>(&searchDat));
-      return searchDat.second;
     }
 
     HWND GetTermWnd(bool &terminalExpected)
@@ -216,35 +206,30 @@ namespace termproc
         return conWnd;
 
       // Polling because it may take some milliseconds for Terminal to create its window and take ownership of the hidden ConPTY window.
-      HWND conOwner = nullptr; // FWIW this receives the terminal window our tab is created in, but it gets never updated if the tab is moved to another window.
-      for (int i = 0; i < 200 && conOwner == nullptr; ++i)
+      HWND conOwner = nullptr;
+      for (int i = 0; i < 100 && conOwner == nullptr; ++i)
       {
         ::Sleep(5);
         conOwner = ::GetWindow(conWnd, GW_OWNER);
       }
 
-      // Something went wrong if polling did not succeed within 1 second (e.g. it's not Windows Terminal).
-      if (conOwner == nullptr)
-        return nullptr;
+      if (conOwner != nullptr)
+        return conOwner; // This is the terminal window hosting our process if it has been an existing window.
 
+      // In case the terminal process has been newly created for us ...
       // Get the ID of the Shell process that spawned the Conhost process.
       DWORD shellPid = 0;
-      const auto shellTid{ ::GetWindowThreadProcessId(conWnd, &shellPid) };
-      if (shellTid == 0)
+      if (::GetWindowThreadProcessId(conWnd, &shellPid) == 0)
         return nullptr;
 
-      // Get the ID of the OpenConsole process spawned for the Shell process.
-      const auto openConPid{ GetPidOfNamedProcWithOpenProcHandle(L"OpenConsole", shellPid) };
-      if (openConPid == 0)
+      // Try to figure out which of WindowsTerminal processes has a handle to the Shell process open.
+      const auto termPid = GetPidOfNamedProcWithOpenProcHandle(L"WindowsTerminal", shellPid);
+      if (termPid == 0)
         return nullptr;
 
-      // Get the hidden window of the OpenConsole process
-      const HWND openConWnd{ GetOpenConWnd(openConPid) };
-      if (openConWnd == nullptr)
-        return nullptr;
-
-      // The root owner window is the Terminal window.
-      return ::GetAncestor(openConWnd, GA_ROOTOWNER);
+      wnd_callback_dat_t searchDat{ termPid, nullptr };
+      ::EnumWindows(GetTermWndCallback, reinterpret_cast<LPARAM>(&searchDat));
+      return searchDat.second;
     }
 
   public:

@@ -58,11 +58,6 @@ set TermWnd=^
 %=========% internal static extern int CompareObjectHandles(IntPtr hFirst, IntPtr hSecond);^
 %=========% [DllImport(\"kernel32.dll\")]^
 %=========% internal static extern int DuplicateHandle(IntPtr SrcProcHndl, IntPtr SrcHndl, IntPtr TrgtProcHndl, out IntPtr TrgtHndl, int Acc, int Inherit, int Opts);^
-%=========% [DllImport(\"user32.dll\")]^
-%=========% [return: MarshalAs(UnmanagedType.Bool)]^
-%=========% internal static extern bool EnumWindows(EnumWindowsProc enumFunc, IntPtr param);^
-%=========% [DllImport(\"user32.dll\")]^
-%=========% internal static extern IntPtr GetAncestor(IntPtr hWnd, int flgs);^
 %=========% [DllImport(\"kernel32.dll\")]^
 %=========% internal static extern IntPtr GetConsoleWindow();^
 %=========% [DllImport(\"kernel32.dll\")]^
@@ -173,43 +168,21 @@ set TermWnd=^
 %===========% }^
 %=========% }^
 %=======% }^
-%=======% private static uint findPid;^
-%=======% private static IntPtr foundHWnd;^
-%=======% private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);^
-%=======% private static bool GetOpenConWndCallback(IntPtr hWnd, IntPtr lParam) {^
-%=========% uint thisPid;^
-%=========% uint thisTid = NativeMethods.GetWindowThreadProcessId(hWnd, out thisPid);^
-%=========% if (thisTid == 0 ^^^|^^^| (thisPid == findPid) == false) { return true; }^
-%=========% foundHWnd = hWnd;^
-%=========% return false;^
-%=======% }^
-%=======% private static IntPtr GetOpenConWnd(uint termPid) {^
-%=========% if (termPid == 0) { return IntPtr.Zero; }^
-%=========% findPid = termPid;^
-%=========% foundHWnd = IntPtr.Zero;^
-%=========% NativeMethods.EnumWindows(new EnumWindowsProc(GetOpenConWndCallback), IntPtr.Zero);^
-%=========% return foundHWnd;^
-%=======% }^
 %=======% private static IntPtr GetTermWnd(ref bool terminalExpected) {^
 %=========% const int WM_GETICON = 0x007F,^
-%===================% GW_OWNER = 4,^
-%===================% GA_ROOTOWNER = 3;^
+%===================% GW_OWNER = 4;^
 %=========% terminalExpected = NativeMethods.SendMessageW(conWnd, WM_GETICON, IntPtr.Zero, IntPtr.Zero) == IntPtr.Zero;^
 %=========% if (terminalExpected == false) { return conWnd; }^
 %=========% IntPtr conOwner = IntPtr.Zero;^
-%=========% for (int i = 0; i ^^^< 200 ^^^&^^^& conOwner == IntPtr.Zero; ++i) {^
+%=========% for (int i = 0; i ^^^< 100 ^^^&^^^& conOwner == IntPtr.Zero; ++i) {^
 %===========% Thread.Sleep(5);^
 %===========% conOwner = NativeMethods.GetWindow(conWnd, GW_OWNER);^
 %=========% }^
-%=========% if (conOwner == IntPtr.Zero) { return IntPtr.Zero; }^
+%=========% if ((conOwner == IntPtr.Zero) == false) { return conOwner; }^
 %=========% uint shellPid;^
-%=========% uint shellTid = NativeMethods.GetWindowThreadProcessId(conWnd, out shellPid);^
-%=========% if (shellTid == 0) { return IntPtr.Zero; }^
-%=========% uint openConPid = GetPidOfNamedProcWithOpenProcHandle(\"OpenConsole\", shellPid);^
-%=========% if (openConPid == 0) { return IntPtr.Zero; }^
-%=========% IntPtr openConWnd = GetOpenConWnd(openConPid);^
-%=========% if (openConWnd == IntPtr.Zero) { return IntPtr.Zero; }^
-%=========% return NativeMethods.GetAncestor(openConWnd, GA_ROOTOWNER);^
+%=========% if (NativeMethods.GetWindowThreadProcessId(conWnd, out shellPid) == 0) { return IntPtr.Zero; }^
+%=========% uint termPid = GetPidOfNamedProcWithOpenProcHandle(\"WindowsTerminal\", shellPid);^
+%=========% return termPid == 0 ? IntPtr.Zero : Process.GetProcessById((int)termPid).MainWindowHandle;^
 %=======% }^
 %=======% static WinTerm() {^
 %=========% const int PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;^

@@ -27,10 +27,6 @@ Namespace TerminalProcess
       Friend Shared Function CompareObjectHandles(ByVal hFirst As IntPtr, ByVal hSecond As IntPtr) As Integer : End Function
       <DllImport("kernel32.dll")>
       Friend Shared Function DuplicateHandle(ByVal SrcProcHndl As IntPtr, ByVal SrcHndl As IntPtr, ByVal TrgtProcHndl As IntPtr, <Out> ByRef TrgtHndl As IntPtr, ByVal Acc As Integer, ByVal Inherit As Integer, ByVal Opts As Integer) As Integer : End Function
-      <DllImport("user32.dll")>
-      Friend Shared Function EnumWindows(ByVal enumFunc As EnumWindowsProc, ByVal lparam As IntPtr) As <MarshalAs(UnmanagedType.Bool)> Boolean : End Function
-      <DllImport("user32.dll")>
-      Friend Shared Function GetAncestor(ByVal hWnd As IntPtr, ByVal flgs As Integer) As IntPtr : End Function
       <DllImport("kernel32.dll")>
       Friend Shared Function GetConsoleWindow() As IntPtr : End Function
       <DllImport("kernel32.dll")>
@@ -234,33 +230,9 @@ Namespace TerminalProcess
       End Using
     End Function
 
-    Private _findPid As UInteger
-    Private _foundHWnd As IntPtr
-
-    Private Delegate Function EnumWindowsProc(ByVal hWnd As IntPtr, ByVal lParam As IntPtr) As Boolean
-
-    Private Function GetOpenConWndCallback(ByVal hWnd As IntPtr, ByVal lParam As IntPtr) As Boolean
-      Dim thisPid As UInteger = 0
-      Dim thisTid = NativeMethods.GetWindowThreadProcessId(hWnd, thisPid)
-      If thisTid = 0 OrElse thisPid <> _findPid Then Return True
-
-      _foundHWnd = hWnd
-      Return False
-    End Function
-
-    Private Function GetOpenConWnd(ByVal termPid As UInteger) As IntPtr
-      If termPid = 0 Then Return IntPtr.Zero
-
-      _findPid = termPid
-      _foundHWnd = IntPtr.Zero
-      NativeMethods.EnumWindows(New EnumWindowsProc(AddressOf GetOpenConWndCallback), IntPtr.Zero)
-      Return _foundHWnd
-    End Function
-
     Private Function GetTermWnd(ByRef terminalExpected As Boolean) As IntPtr
       Const WM_GETICON = &H7F,
-            GW_OWNER = 4,
-            GA_ROOTOWNER = 3
+            GW_OWNER = 4
 
       ' We don't have a proper way to figure out to what terminal app the Shell process
       ' Is connected on the local machine:
@@ -272,31 +244,25 @@ Namespace TerminalProcess
 
       ' Polling because it may take some milliseconds for Terminal to create its window And take ownership of the hidden ConPTY window.
       Dim i = 0
-      Dim conOwner = IntPtr.Zero ' FWIW this receives the terminal window our tab is created in, but it gets never updated if the tab is moved to another window.
-      While (i < 200 AndAlso conOwner = IntPtr.Zero)
+      Dim conOwner = IntPtr.Zero
+      While (i < 100 AndAlso conOwner = IntPtr.Zero)
         Thread.Sleep(5)
         conOwner = NativeMethods.GetWindow(ConWnd, GW_OWNER)
         i += 1
       End While
 
-      ' Something went wrong if polling did Not succeed within 1 second (e.g. it's not Windows Terminal).
-      If conOwner = IntPtr.Zero Then Return IntPtr.Zero
+      If conOwner <> IntPtr.Zero Then _
+        Return conOwner ' This is the terminal window hosting our process if it has been an existing window.
 
+      ' In case the terminal process has been newly created for us ...
       ' Get the ID of the Shell process that spawned the Conhost process.
       Dim shellPid As UInteger = 0
-      Dim shellTid = NativeMethods.GetWindowThreadProcessId(ConWnd, shellPid)
-      If shellTid = 0 Then Return IntPtr.Zero
+      If NativeMethods.GetWindowThreadProcessId(ConWnd, shellPid) = 0 Then Return IntPtr.Zero
 
-      ' Get the ID of the OpenConsole process spawned for the Shell process.
-      Dim openConPid = GetPidOfNamedProcWithOpenProcHandle("OpenConsole", shellPid)
-      If openConPid = 0 Then Return IntPtr.Zero
-
-      ' Get the hidden window of the OpenConsole process
-      Dim openConWnd = GetOpenConWnd(openConPid)
-      If openConWnd = IntPtr.Zero Then Return IntPtr.Zero
-
-      ' The root owner window Is the Terminal window.
-      Return NativeMethods.GetAncestor(openConWnd, GA_ROOTOWNER)
+      ' Try to figure out which of WindowsTerminal processes has a handle to the Shell process open.
+      Dim termPid = GetPidOfNamedProcWithOpenProcHandle("WindowsTerminal", shellPid)
+      If termPid = 0 Then Return IntPtr.Zero
+      Return Process.GetProcessById(CInt(termPid)).MainWindowHandle
     End Function
 
 #If Not DEBUG AndAlso CODE_ANALYSIS Then

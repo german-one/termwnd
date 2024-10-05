@@ -215,26 +215,16 @@ typedef struct
   HWND hWnd;
 } WND_CALLBACK_DAT, *PWND_CALLBACK_DAT;
 
-static BOOL __stdcall GetOpenConWndCallback(HWND hWnd, LPARAM lParam)
+static BOOL __stdcall GetTermWndCallback(HWND hWnd, LPARAM lParam)
 {
   const PWND_CALLBACK_DAT pSearchDat = (PWND_CALLBACK_DAT)lParam;
   DWORD pid = 0;
   GetWindowThreadProcessId(hWnd, &pid);
-  if (pid != pSearchDat->pid)
+  if (pid != pSearchDat->pid || !IsWindowVisible(hWnd) || GetWindow(hWnd, GW_OWNER))
     return TRUE;
 
   pSearchDat->hWnd = hWnd;
   return FALSE;
-}
-
-static HWND GetOpenConWnd(const DWORD termPid)
-{
-  if (!termPid)
-    return NULL;
-
-  WND_CALLBACK_DAT searchDat = { termPid, NULL };
-  EnumWindows(GetOpenConWndCallback, (LPARAM)&searchDat);
-  return searchDat.hWnd;
 }
 
 static HWND GetTermWnd(bool *const pTerminalExpected)
@@ -250,35 +240,28 @@ static HWND GetTermWnd(bool *const pTerminalExpected)
     return conWnd;
 
   // Polling because it may take some milliseconds for Terminal to create its window and take ownership of the hidden ConPTY window.
-  HWND conOwner = NULL; // FWIW this receives the terminal window our tab is created in, but it gets never updated if the tab is moved to another window.
-  for (int i = 0; i < 200 && conOwner == NULL; ++i)
+  HWND conOwner = NULL;
+  for (int i = 0; i < 100 && conOwner == NULL; ++i)
   {
     Sleep(5);
     conOwner = GetWindow(conWnd, GW_OWNER);
   }
 
-  // Something went wrong if polling did not succeed within 1 second (e.g. it's not Windows Terminal).
-  if (conOwner == NULL)
-    return NULL;
+  if (conOwner != NULL)
+    return conOwner; // This is the terminal window hosting our process if it has been an existing window.
 
+  // In case the terminal process has been newly created for us ...
   // Get the ID of the Shell process that spawned the Conhost process.
   DWORD shellPid = 0;
-  const DWORD shellTid = GetWindowThreadProcessId(conWnd, &shellPid);
-  if (shellTid == 0)
+  if (GetWindowThreadProcessId(conWnd, &shellPid) == 0)
     return NULL;
 
-  // Get the ID of the OpenConsole process spawned for the Shell process.
-  const DWORD openConPid = GetPidOfNamedProcWithOpenProcHandle(L"OpenConsole", shellPid);
-  if (openConPid == 0)
-    return NULL;
+  // Try to figure out which of WindowsTerminal processes has a handle to the Shell process open.
+  const DWORD termPid = GetPidOfNamedProcWithOpenProcHandle(L"WindowsTerminal", shellPid);
 
-  // Get the hidden window of the OpenConsole process
-  const HWND openConWnd = GetOpenConWnd(openConPid);
-  if (openConWnd == NULL)
-    return NULL;
-
-  // The root owner window is the Terminal window.
-  return GetAncestor(openConWnd, GA_ROOTOWNER);
+  WND_CALLBACK_DAT searchDat = { termPid, NULL };
+  EnumWindows(GetTermWndCallback, (LPARAM)&searchDat);
+  return searchDat.hWnd;
 }
 
 bool GetWinterm(winterm_t *pWinterm)
