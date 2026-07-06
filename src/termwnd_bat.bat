@@ -57,6 +57,8 @@ set TermWnd=^
 %=========% [DllImport(\"kernelbase.dll\")]^
 %=========% internal static extern int CompareObjectHandles(IntPtr hFirst, IntPtr hSecond);^
 %=========% [DllImport(\"kernel32.dll\")]^
+%=========% internal static extern IntPtr CreateJobObjectW(IntPtr Attr, IntPtr Name);^
+%=========% [DllImport(\"kernel32.dll\")]^
 %=========% internal static extern int DuplicateHandle(IntPtr SrcProcHndl, IntPtr SrcHndl, IntPtr TrgtProcHndl, out IntPtr TrgtHndl, int Acc, int Inherit, int Opts);^
 %=========% [DllImport(\"kernel32.dll\")]^
 %=========% internal static extern IntPtr GetConsoleWindow();^
@@ -66,6 +68,8 @@ set TermWnd=^
 %=========% internal static extern IntPtr GetWindow(IntPtr hWnd, int cmd);^
 %=========% [DllImport(\"user32.dll\")]^
 %=========% internal static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint procId);^
+%=========% [DllImport(\"ntdll.dll\")]^
+%=========% internal static extern int NtQueryObject(IntPtr Hndl, int ObjInfClass, byte[] ObjInf, int ObjInfLen, IntPtr RetLen);^
 %=========% [DllImport(\"ntdll.dll\")]^
 %=========% internal static extern int NtQuerySystemInformation(int SysInfClass, IntPtr SysInf, int SysInfLen, out int RetLen);^
 %=========% [DllImport(\"kernel32.dll\")]^
@@ -118,6 +122,16 @@ set TermWnd=^
 %=========% internal readonly IntPtr pObj;^
 %=========% internal readonly uint Acc;^
 %=======% }^
+%=======% private static byte GetKernelJobTypeIndex() {^
+%=========% byte[] buffer;^
+%=========% using (SafeRes sHJob = new SafeRes(NativeMethods.CreateJobObjectW(IntPtr.Zero, IntPtr.Zero), SafeRes.ResType.Handle)) {^
+%===========% if (sHJob.IsInvalid) return 7;^
+%===========% buffer = new byte[1024];^
+%===========% int status = NativeMethods.NtQueryObject(sHJob.Raw, 2, buffer, buffer.Length, IntPtr.Zero);^
+%===========% if (status ^^^< 0) return 7;^
+%=========% }^
+%=========% return buffer[2 * IntPtr.Size + 74];^
+%=======% }^
 %=======% private static string GetProcBaseName(SafeRes sHProc) {^
 %=========% int size = 1024;^
 %=========% StringBuilder nameBuf = new StringBuilder(size);^
@@ -128,7 +142,6 @@ set TermWnd=^
 %===================% PROCESS_QUERY_LIMITED_INFORMATION = 0x1000,^
 %===================% STATUS_INFO_LENGTH_MISMATCH = unchecked((int)0xc0000004),^
 %===================% SystemHandleInformation = 16;^
-%=========% const byte OB_TYPE_INDEX_JOB = 7;^
 %=========% int status, infSize = 0x200000, len;^
 %=========% using (SafeRes sPSysHndlInf = new SafeRes(Marshal.AllocHGlobal(infSize), SafeRes.ResType.MemoryPointer)) {^
 %===========% while ((status = NativeMethods.NtQuerySystemInformation(SystemHandleInformation, sPSysHndlInf.Raw, infSize, out len)) == STATUS_INFO_LENGTH_MISMATCH) {^
@@ -140,12 +153,13 @@ set TermWnd=^
 %=============% uint foundPid = 0, curPid = 0;^
 %=============% IntPtr hThis = NativeMethods.GetCurrentProcess();^
 %=============% int sysHndlSize = Marshal.SizeOf(typeof(SystemHandle));^
+%=============% byte jobId = GetKernelJobTypeIndex();^
 %=============% using (SafeRes sHCur = new SafeRes(IntPtr.Zero, SafeRes.ResType.Handle)) {^
 %===============% for (IntPtr pSysHndl = (IntPtr)((long)sPSysHndlInf.Raw + IntPtr.Size), pEnd = (IntPtr)((long)pSysHndl + Marshal.ReadInt32(sPSysHndlInf.Raw) * sysHndlSize);^
 %====================% (pSysHndl == pEnd) == false;^
 %====================% pSysHndl = (IntPtr)((long)pSysHndl + sysHndlSize)) {^
 %=================% SystemHandle sysHndl = (SystemHandle)Marshal.PtrToStructure(pSysHndl, typeof(SystemHandle));^
-%=================% if ((sysHndl.ObjTypeId == OB_TYPE_INDEX_JOB) == false) { continue; }^
+%=================% if ((sysHndl.ObjTypeId == jobId) == false) { continue; }^
 %=================% if ((curPid == sysHndl.ProcId) == false) {^
 %===================% curPid = sysHndl.ProcId;^
 %===================% sHCur.Reset(NativeMethods.OpenProcess(PROCESS_DUP_HANDLE ^^^| PROCESS_QUERY_LIMITED_INFORMATION, 0, curPid));^

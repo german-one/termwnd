@@ -19,8 +19,10 @@
 #endif
 #define WIN32_LEAN_AND_MEAN 1
 #include <Windows.h>
-#include <SubAuth.h>
+#include <ntstatus.h>
+#include <winternl.h>
 #include <array>
+#include <exception>
 #include <filesystem>
 #include <format>
 #include <iostream>
@@ -31,17 +33,20 @@
 #include <string_view>
 #include <utility>
 
+// additional linker dependencies: ntdll.lib; onecore.lib
+
 #ifdef NDEBUG
 #  if defined(__GNUC__) || defined(__clang__)
 #    pragma GCC diagnostic push
-#    pragma GCC diagnostic ignored "-Wcast-function-type"
 #    pragma GCC diagnostic ignored "-Weffc++"
+#    pragma GCC diagnostic ignored "-Wpadded"
 #    if defined(__clang__)
-#      pragma GCC diagnostic ignored "-Wc++98-compat"
+#      pragma clang diagnostic ignored "-Wc++98-compat"
+#      pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
 #    endif
 #  elif defined(_MSC_VER)
 #    pragma warning(push)
-#    pragma warning(disable : 4191 4623 4626 4706 4710 4711 4820 5027 26472 26481 26490 26821)
+#    pragma warning(disable : 4623 4626 4710 4711 4820 5027 26446 26472 26481 26490 26821)
 #  endif
 #endif
 
@@ -87,11 +92,31 @@ namespace termproc
   class winterm
   {
   private:
+    BYTE m_jobTypeId{ GetKernelJobTypeIndex() };
     HWND m_conWnd{ ::GetConsoleWindow() };
     HWND m_hWnd{};
     DWORD m_pid{};
     DWORD m_tid{};
     std::wstring m_baseName{};
+
+    // Get the Job Type Index via an anonymous Job object
+    BYTE GetKernelJobTypeIndex(void) noexcept
+    {
+      static constexpr BYTE fallback{ 7 }; // at the time of writing this code, 7 is the Job type id on Windows 10/11
+      std::array<BYTE, 1024> buffer{}; // represents an OBJECT_TYPE_INFORMATION object with variable size; 1KB is more than enough for a single type query that typically writes < 150 bytes
+      const HANDLE hJob = ::CreateJobObjectW(nullptr, nullptr);
+      if (hJob == nullptr)
+        return fallback;
+
+      const NTSTATUS status = ::NtQueryObject(hJob, OBJECT_INFORMATION_CLASS::ObjectTypeInformation, buffer.data(), static_cast<ULONG>(buffer.size()), nullptr);
+      CloseHandle(hJob);
+      if (!NT_SUCCESS(status))
+        return fallback;
+
+      // position of the undocumented OBJECT_TYPE_INFORMATION::TypeIndex field, available since Windows 8, see https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/ntobapi/object_type_information.htm
+      // values of this field match SYSTEM_HANDLE_TABLE_ENTRY_INFO::ObjectTypeIndex values
+      return buffer[sizeof(UNICODE_STRING) + 74]; // size of field TypeName, another 74 bytes to skip over fields TotalNumberOfObjects to MaintainHandleCount
+    }
 
     std::wstring GetProcBaseName(const HANDLE hProc, std::span<wchar_t> nameBuf)
     {
@@ -101,23 +126,7 @@ namespace termproc
 
     DWORD GetPidOfNamedProcWithOpenProcHandle(std::wstring_view searchProcName, const DWORD findOpenProcId)
     {
-      using NtQuerySystemInformation_t = NTSTATUS(__stdcall *)(int SysInfClass, PVOID SysInf, DWORD SysInfLen, PDWORD RetLen);
-      using CompareObjectHandles_t = BOOL(__stdcall *)(HANDLE hFirst, HANDLE hSecond);
-
-      static constexpr auto STATUS_INFO_LENGTH_MISMATCH{ static_cast<NTSTATUS>(0xc0000004) }; // NTSTATUS returned if we still didn't allocate enough memory
-      static constexpr auto SystemHandleInformation{ 16 }; // one of the SYSTEM_INFORMATION_CLASS values
-      static constexpr BYTE OB_TYPE_INDEX_JOB{ 7 }; // one of the SYSTEM_HANDLE.ObjTypeId values
-
-      NtQuerySystemInformation_t NtQuerySystemInformation{};
-      CompareObjectHandles_t CompareObjectHandles{};
-
-      HMODULE hModule{ ::GetModuleHandleA("ntdll.dll") };
-      if (!hModule || !(NtQuerySystemInformation = reinterpret_cast<NtQuerySystemInformation_t>(::GetProcAddress(hModule, "NtQuerySystemInformation"))))
-        return {};
-
-      hModule = ::GetModuleHandleA("kernelbase.dll");
-      if (!hModule || !(CompareObjectHandles = reinterpret_cast<CompareObjectHandles_t>(::GetProcAddress(hModule, "CompareObjectHandles"))))
-        return {};
+      static constexpr auto SystemHandleInformation{ static_cast<::SYSTEM_INFORMATION_CLASS>(16) }; // one of the SYSTEM_INFORMATION_CLASS values
 
       // allocate some memory representing an undocumented SYSTEM_HANDLE_INFORMATION object, which can't be meaningfully declared in C# code
       DWORD infSize{ 0x200000 };
@@ -128,7 +137,7 @@ namespace termproc
       DWORD len;
       NTSTATUS status;
       // try to get an array of all available SYSTEM_HANDLE objects, allocate more memory if necessary
-      while ((status = NtQuerySystemInformation(SystemHandleInformation, sPSysHandlInf.get(), infSize, &len)) == STATUS_INFO_LENGTH_MISMATCH)
+      while ((status = ::NtQuerySystemInformation(SystemHandleInformation, sPSysHandlInf.get(), infSize, &len)) == STATUS_INFO_LENGTH_MISMATCH)
       {
         infSize = len + 0x1000;
         sPSysHandlInf.reset(static_cast<BYTE *>(::GlobalAlloc(GMEM_FIXED, infSize)));
@@ -139,7 +148,7 @@ namespace termproc
       if (!NT_SUCCESS(status))
         return {};
 
-      const auto sHFindOpenProc{ saferes::MakeHandle(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, findOpenProcId)) }; // intentionally after NtQuerySystemInformation() was called to exclude it from the found open handles
+      const auto sHFindOpenProc{ saferes::MakeHandle(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, findOpenProcId)) }; // intentionally after ::NtQuerySystemInformation() was called to exclude it from the found open handles
       if (saferes::IsInvalidHandle(sHFindOpenProc))
         return {};
 
@@ -152,8 +161,8 @@ namespace termproc
       for (const auto &sysHandle :
            std::span{ reinterpret_cast<detail::SYSTEM_HANDLE *>(sPSysHandlInf.get() + sizeof(intptr_t)), *reinterpret_cast<DWORD *>(sPSysHandlInf.get()) })
       {
-        // shortcut; OB_TYPE_INDEX_JOB is the identifier we are looking for, any other SYSTEM_HANDLE object is immediately ignored at this point
-        if (sysHandle.ObjTypeId != OB_TYPE_INDEX_JOB)
+        // shortcut; m_jobTypeId is the identifier we are looking for, any other SYSTEM_HANDLE object is immediately ignored at this point
+        if (sysHandle.ObjTypeId != m_jobTypeId)
           continue;
 
         // every time the process changes, the previous handle needs to be closed and we open a new handle to the current process
@@ -172,7 +181,7 @@ namespace termproc
           continue;
 
         const auto sHCurOpenDup{ saferes::MakeHandle(hCurOpenDup) };
-        if (CompareObjectHandles(sHCurOpenDup.get(), sHFindOpenProc.get()) && // both the handle of the open process and the currently duplicated handle must refer to the same kernel object
+        if (::CompareObjectHandles(sHCurOpenDup.get(), sHFindOpenProc.get()) && // both the handle of the open process and the currently duplicated handle must refer to the same kernel object
             searchProcName == GetProcBaseName(sHCur.get(), nameBuf)) // the process name of the currently found process must meet the process name we are looking for
           return curPid;
       }

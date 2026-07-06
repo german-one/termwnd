@@ -26,6 +26,8 @@ Namespace TerminalProcess
       <DllImport("kernelbase.dll")>
       Friend Shared Function CompareObjectHandles(ByVal hFirst As IntPtr, ByVal hSecond As IntPtr) As Integer : End Function
       <DllImport("kernel32.dll")>
+      Friend Shared Function CreateJobObjectW(ByVal Attr As IntPtr, ByVal Name As IntPtr) As IntPtr : End Function
+      <DllImport("kernel32.dll")>
       Friend Shared Function DuplicateHandle(ByVal SrcProcHndl As IntPtr, ByVal SrcHndl As IntPtr, ByVal TrgtProcHndl As IntPtr, <Out> ByRef TrgtHndl As IntPtr, ByVal Acc As Integer, ByVal Inherit As Integer, ByVal Opts As Integer) As Integer : End Function
       <DllImport("kernel32.dll")>
       Friend Shared Function GetConsoleWindow() As IntPtr : End Function
@@ -35,6 +37,8 @@ Namespace TerminalProcess
       Friend Shared Function GetWindow(ByVal hWnd As IntPtr, ByVal cmd As Integer) As IntPtr : End Function
       <DllImport("user32.dll")>
       Friend Shared Function GetWindowThreadProcessId(ByVal hWnd As IntPtr, <Out> ByRef procId As UInteger) As UInteger : End Function
+      <DllImport("ntdll.dll")>
+      Friend Shared Function NtQueryObject(ByVal Hndl As IntPtr, ByVal ObjInfClass As Integer, ByVal ObjInf As Byte(), ByVal ObjInfLen As Integer, ByVal RetLen As IntPtr) As Integer : End Function
       <DllImport("ntdll.dll")>
       Friend Shared Function NtQuerySystemInformation(ByVal SysInfClass As Integer, ByVal SysInf As IntPtr, ByVal SysInfLen As Integer, <Out> ByRef RetLen As Integer) As Integer : End Function
       <DllImport("kernel32.dll")>
@@ -75,6 +79,7 @@ Namespace TerminalProcess
 #Else
     Private _hWnd As IntPtr = IntPtr.Zero
 #End If
+    Private _job As Byte = 7
     Private _pid As UInteger = 0
     Private _tid As UInteger = 0
     Private _baseName As String = String.Empty
@@ -152,6 +157,20 @@ Namespace TerminalProcess
       Friend ReadOnly Acc As UInteger
     End Structure
 
+    Private Sub InitKernelJobTypeIndex()
+      Dim buffer() As Byte
+      Using sHJob As New SafeRes(NativeMethods.CreateJobObjectW(IntPtr.Zero, IntPtr.Zero), SafeRes.ResType.Handle)
+        If sHJob.IsInvalid Then Return
+        ReDim buffer(1024) ' represents an OBJECT_TYPE_INFORMATION object; 1KB is more than enough for a single type query that typically writes < 150 bytes
+        Dim status As Integer = NativeMethods.NtQueryObject(sHJob.Raw, 2, buffer, buffer.Length, IntPtr.Zero)
+        If status < 0 Then Return
+      End Using
+
+      ' position of the undocumented OBJECT_TYPE_INFORMATION:TypeIndex field, available since Windows 8, see https: //www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/ntobapi/object_type_information.htm
+      ' values of this field match SYSTEM_HANDLE_TABLE_ENTRY_INFO:ObjectTypeIndex values
+      _job = buffer(2 * IntPtr.Size + 74) ' 2 * IntPtr.Size Is the size Of field UNICODE_STRING TypeName, another 74 bytes To skip over fields TotalNumberOfObjects To MaintainHandleCount
+    End Sub
+
     Private Function GetProcBaseName(ByRef sHProc As SafeRes) As String
       Dim size = 1024, nameBuf = New StringBuilder(size)
       Return If(NativeMethods.QueryFullProcessImageNameW(sHProc.Raw, 0, nameBuf, size) = 0, "", Path.GetFileNameWithoutExtension(nameBuf.ToString(0, size)))
@@ -164,8 +183,7 @@ Namespace TerminalProcess
       Const PROCESS_DUP_HANDLE = &H40, ' access right to duplicate handles
             PROCESS_QUERY_LIMITED_INFORMATION = &H1000, ' access right to retrieve certain process information
             STATUS_INFO_LENGTH_MISMATCH = &HC0000004%, ' NTSTATUS returned if we still didn't allocate enough memory
-            SystemHandleInformation = 16, ' one of the SYSTEM_INFORMATION_CLASS values
-            OB_TYPE_INDEX_JOB As Byte = 7 ' one of the SYSTEM_HANDLE.ObjTypeId values
+            SystemHandleInformation = 16 ' one of the SYSTEM_INFORMATION_CLASS values
       Dim status As Integer, ' retrieves the NTSTATUS return value
           infSize = &H200000, ' initially allocated memory size for the SYSTEM_HANDLE_INFORMATION object
           len = 0
@@ -193,7 +211,7 @@ Namespace TerminalProcess
               ' get one SYSTEM_HANDLE at a time
               Dim sysHndl = DirectCast(Marshal.PtrToStructure(pSysHndl, GetType(SystemHandle)), SystemHandle)
               ' shortcut; OB_TYPE_INDEX_JOB is the identifier we are looking for, any other SYSTEM_HANDLE object is immediately ignored at this point
-              If sysHndl.ObjTypeId <> OB_TYPE_INDEX_JOB Then
+              If sysHndl.ObjTypeId <> _job Then
                 pSysHndl += sysHndlSize
                 Continue While
               End If
@@ -273,6 +291,7 @@ Namespace TerminalProcess
 #Else
     Sub New()
 #End If
+      InitKernelJobTypeIndex()
       Refresh()
     End Sub
 

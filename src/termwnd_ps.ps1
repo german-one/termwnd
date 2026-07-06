@@ -21,6 +21,8 @@ try { Add-Type -EA SilentlyContinue -TypeDefinition @'
       [DllImport("kernelbase.dll")]
       internal static extern int CompareObjectHandles(IntPtr hFirst, IntPtr hSecond);
       [DllImport("kernel32.dll")]
+      internal static extern IntPtr CreateJobObjectW(IntPtr Attr, IntPtr Name);
+      [DllImport("kernel32.dll")]
       internal static extern int DuplicateHandle(IntPtr SrcProcHndl, IntPtr SrcHndl, IntPtr TrgtProcHndl, out IntPtr TrgtHndl, int Acc, int Inherit, int Opts);
       [DllImport("kernel32.dll")]
       internal static extern IntPtr GetConsoleWindow();
@@ -30,6 +32,8 @@ try { Add-Type -EA SilentlyContinue -TypeDefinition @'
       internal static extern IntPtr GetWindow(IntPtr hWnd, int cmd);
       [DllImport("user32.dll")]
       internal static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint procId);
+      [DllImport("ntdll.dll")]
+      internal static extern int NtQueryObject(IntPtr Hndl, int ObjInfClass, byte[] ObjInf, int ObjInfLen, IntPtr RetLen);
       [DllImport("ntdll.dll")]
       internal static extern int NtQuerySystemInformation(int SysInfClass, IntPtr SysInf, int SysInfLen, out int RetLen);
       [DllImport("kernel32.dll")]
@@ -47,6 +51,7 @@ try { Add-Type -EA SilentlyContinue -TypeDefinition @'
     public static uint Tid { get { return tid; } } //# thread id
     public static string BaseName { get { return baseName; } } //# process name without .exe extension
 
+    private static byte job = 7; //# fallback: at the time of writing this code, 7 is the Job type id on Windows 10/11
     private static IntPtr hWnd = IntPtr.Zero;
     private static uint pid = 0;
     private static uint tid = 0;
@@ -107,6 +112,20 @@ try { Add-Type -EA SilentlyContinue -TypeDefinition @'
       internal readonly uint Acc;
     }
 
+    private static void InitKernelJobTypeIndex() {
+      byte[] buffer;
+      using (SafeRes sHJob = new SafeRes(NativeMethods.CreateJobObjectW(IntPtr.Zero, IntPtr.Zero), SafeRes.ResType.Handle)) {
+        if (sHJob.IsInvalid) return;
+        buffer = new byte[1024]; //# represents an OBJECT_TYPE_INFORMATION object; 1KB is more than enough for a single type query that typically writes < 150 bytes
+        int status = NativeMethods.NtQueryObject(sHJob.Raw, 2, buffer, buffer.Length, IntPtr.Zero);
+        if (status < 0) return;
+      }
+
+      //# position of the undocumented OBJECT_TYPE_INFORMATION::TypeIndex field, available since Windows 8, see https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/ntobapi/object_type_information.htm
+      //# values of this field match SYSTEM_HANDLE_TABLE_ENTRY_INFO::ObjectTypeIndex values
+      job = buffer[2 * IntPtr.Size + 74]; //# 2 * IntPtr.Size is the size of field UNICODE_STRING TypeName, another 74 bytes to skip over fields TotalNumberOfObjects to MaintainHandleCount
+    }
+
     private static string GetProcBaseName(SafeRes sHProc) {
       int size = 1024;
       StringBuilder nameBuf = new StringBuilder(size);
@@ -121,7 +140,6 @@ try { Add-Type -EA SilentlyContinue -TypeDefinition @'
                 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000, //# access right to retrieve certain process information
                 STATUS_INFO_LENGTH_MISMATCH = unchecked((int)0xc0000004), //# NTSTATUS returned if we still didn't allocate enough memory
                 SystemHandleInformation = 16; //# one of the SYSTEM_INFORMATION_CLASS values
-      const byte OB_TYPE_INDEX_JOB = 7; //# one of the SYSTEM_HANDLE.ObjTypeId values
       int status, //# retrieves the NTSTATUS return value
           infSize = 0x200000, //# initially allocated memory size for the SYSTEM_HANDLE_INFORMATION object
           len;
@@ -147,8 +165,8 @@ try { Add-Type -EA SilentlyContinue -TypeDefinition @'
                  pSysHndl = (IntPtr)((long)pSysHndl + sysHndlSize)) {
               //# get one SYSTEM_HANDLE at a time
               SystemHandle sysHndl = (SystemHandle)Marshal.PtrToStructure(pSysHndl, typeof(SystemHandle));
-              //# shortcut; OB_TYPE_INDEX_JOB is the identifier we are looking for, any other SYSTEM_HANDLE object is immediately ignored at this point
-              if (sysHndl.ObjTypeId != OB_TYPE_INDEX_JOB) { continue; }
+              //# shortcut; job is the identifier we are looking for, any other SYSTEM_HANDLE object is immediately ignored at this point
+              if (sysHndl.ObjTypeId != job) { continue; }
               //# every time the process changes, the previous handle needs to be closed and we open a new handle to the current process
               if (curPid != sysHndl.ProcId) {
                 curPid = sysHndl.ProcId;
@@ -213,6 +231,7 @@ try { Add-Type -EA SilentlyContinue -TypeDefinition @'
     }
 
     static WinTerm() {
+      InitKernelJobTypeIndex();
       Refresh();
     }
 

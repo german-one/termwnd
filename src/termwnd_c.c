@@ -23,12 +23,38 @@
 #endif
 #define WIN32_LEAN_AND_MEAN 1
 #include <Windows.h>
-#include <SubAuth.h>
+#include <ntstatus.h>
+#include <winternl.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <wchar.h>
+
+// additional linker dependencies: ntdll.lib; onecore.lib
+
+#ifdef NDEBUG
+#  if defined(__GNUC__) || defined(__clang__)
+#    pragma GCC diagnostic push
+#    pragma GCC diagnostic ignored "-Wcast-align"
+#    pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+#    pragma GCC diagnostic ignored "-Wpadded"
+#    if defined(__clang__)
+#      pragma clang diagnostic ignored "-Wc++-keyword"
+#      pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+#    endif
+#  elif defined(_MSC_VER)
+#    pragma warning(push)
+#    pragma warning(                                                                                   \
+      disable : 4706 /* assignment within conditional expression */                                    \
+      4710 /* function not inline */                                                                   \
+      4711 /* function selected for inline expansion */                                                \
+      4820 /* padding added */                                                                         \
+      5045 /* compiler will insert Spectre mitigation for memory load if /Qspectre switch specified */ \
+    )
+#  endif
+#endif
 
 typedef struct
 {
@@ -49,25 +75,6 @@ typedef enum
 // for fading out or fading in a window, used to prove that we found the right terminal process
 void Fade(const HWND hWnd, const FadeMode mode);
 
-#ifdef NDEBUG
-#  if defined(__GNUC__) || defined(__clang__)
-#    pragma GCC diagnostic push
-#    pragma GCC diagnostic ignored "-Wcast-align"
-#    pragma GCC diagnostic ignored "-Wcast-function-type"
-#    pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
-#  elif defined(_MSC_VER)
-#    pragma warning(push)
-#    pragma warning(                                                                                   \
-      disable : 4191 /* unsafe conversion (function types) */                                          \
-      4706 /* assignment within conditional expression */                                              \
-      4710 /* function not inline */                                                                   \
-      4711 /* function selected for inline expansion */                                                \
-      4820 /* padding added */                                                                         \
-      5045 /* compiler will insert Spectre mitigation for memory load if /Qspectre switch specified */ \
-    )
-#  endif
-#endif
-
 int main(void)
 {
   for (winterm_t winterm;;)
@@ -82,6 +89,25 @@ int main(void)
 
     Sleep(5000); // [Terminal version >= 1.18] Gives you some time to move the tab out or attach it to another window.
   }
+}
+
+// Get the Job Type Index via an anonymous Job object
+static BYTE GetKernelJobTypeIndex(void)
+{
+  static const BYTE fallback = 7; // at the time of writing this code, 7 is the Job type id on Windows 10/11
+  BYTE buffer[1024]; // represents an OBJECT_TYPE_INFORMATION object with variable size; 1KB is more than enough for a single type query that typically writes < 150 bytes
+  const HANDLE hJob = CreateJobObjectW(NULL, NULL);
+  if (hJob == NULL)
+    return fallback;
+
+  const NTSTATUS status = NtQueryObject(hJob, ObjectTypeInformation, buffer, sizeof(buffer), NULL);
+  CloseHandle(hJob);
+  if (!NT_SUCCESS(status))
+    return fallback;
+
+  // position of the undocumented OBJECT_TYPE_INFORMATION::TypeIndex field, available since Windows 8, see https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/ntobapi/object_type_information.htm
+  // values of this field match SYSTEM_HANDLE_TABLE_ENTRY_INFO::ObjectTypeIndex values
+  return buffer[sizeof(UNICODE_STRING) + 74]; // size of field TypeName, another 74 bytes to skip over fields TotalNumberOfObjects to MaintainHandleCount
 }
 
 // Get the name of the process from the process handle.
@@ -117,38 +143,26 @@ typedef struct
 // Return 0 if no such process is found.
 static DWORD GetPidOfNamedProcWithOpenProcHandle(const wchar_t *const searchProcName, const DWORD findOpenProcId)
 {
-  typedef NTSTATUS(__stdcall * NtQuerySystemInformation_t)(int SysInfClass, PVOID SysInf, DWORD SysInfLen, PDWORD RetLen);
-  typedef BOOL(__stdcall * CompareObjectHandles_t)(HANDLE hFirst, HANDLE hSecond);
-
-  static const NTSTATUS STATUS_INFO_LENGTH_MISMATCH = (NTSTATUS)0xc0000004; // NTSTATUS returned if we still didn't allocate enough memory
   static const int SystemHandleInformation = 16; // one of the SYSTEM_INFORMATION_CLASS values
-  static const BYTE OB_TYPE_INDEX_JOB = 7; // one of the SYSTEM_HANDLE.ObjTypeId values
+  static BYTE jobTypeId; // one of the SYSTEM_HANDLE.ObjTypeId values
 
-  NtQuerySystemInformation_t NtQuerySystemInformation;
-  CompareObjectHandles_t CompareObjectHandles;
-
-  HMODULE hModule = GetModuleHandleA("ntdll.dll");
-  if (!hModule || !(NtQuerySystemInformation = (NtQuerySystemInformation_t)GetProcAddress(hModule, "NtQuerySystemInformation")))
-    return 0;
-
-  hModule = GetModuleHandleA("kernelbase.dll");
-  if (!hModule || !(CompareObjectHandles = (CompareObjectHandles_t)GetProcAddress(hModule, "CompareObjectHandles")))
-    return 0;
+  if (!jobTypeId)
+    jobTypeId = GetKernelJobTypeIndex();
 
   // allocate some memory representing an undocumented SYSTEM_HANDLE_INFORMATION object, which can't be meaningfully declared in C# code
   DWORD infSize = 0x200000;
-  PBYTE pSysHndlInf = GlobalAlloc(GMEM_FIXED, infSize);
+  PBYTE pSysHndlInf = (PBYTE)GlobalAlloc(GMEM_FIXED, infSize);
   if (!pSysHndlInf)
     return 0;
 
   DWORD len;
   NTSTATUS status;
   // try to get an array of all available SYSTEM_HANDLE objects, allocate more memory if necessary
-  while ((status = NtQuerySystemInformation(SystemHandleInformation, (PVOID)pSysHndlInf, infSize, &len)) == STATUS_INFO_LENGTH_MISMATCH)
+  while ((status = NtQuerySystemInformation((SYSTEM_INFORMATION_CLASS)SystemHandleInformation, (PVOID)pSysHndlInf, infSize, &len)) == STATUS_INFO_LENGTH_MISMATCH)
   {
     GlobalFree(pSysHndlInf);
     infSize = len + 0x1000;
-    pSysHndlInf = GlobalAlloc(GMEM_FIXED, infSize);
+    pSysHndlInf = (PBYTE)GlobalAlloc(GMEM_FIXED, infSize);
     if (!pSysHndlInf)
       return 0;
   }
@@ -172,8 +186,8 @@ static DWORD GetPidOfNamedProcWithOpenProcHandle(const wchar_t *const searchProc
        !foundPid && pSysHndl < pEnd;
        ++pSysHndl)
   {
-    // shortcut; OB_TYPE_INDEX_JOB is the identifier we are looking for, any other SYSTEM_HANDLE object is immediately ignored at this point
-    if (pSysHndl->ObjTypeId != OB_TYPE_INDEX_JOB)
+    // shortcut; jobTypeId is the identifier we are looking for, any other SYSTEM_HANDLE object is immediately ignored at this point
+    if (pSysHndl->ObjTypeId != jobTypeId)
       continue;
 
     // every time the process changes, the previous handle needs to be closed and we open a new handle to the current process
